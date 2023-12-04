@@ -24,9 +24,121 @@
 
 // Internal headers
 #include <tm.h>
-
 #include "macros.h"
 
+
+struct Word {
+    void* w[2];
+    //which copy is valid from the previous epoch
+    int valid;
+    // length of each word
+    size_t align;
+    //whether the word has been written in the current epoch
+    bool written;
+    //whether they are 2 transactions has accessed the word in the current epoch
+    bool accessed_by_two;
+    //which transaction has accessed the word in the current epoch
+    tx_t accessed_by;
+};
+static Word* const invalid_word = NULL;
+
+void word_clean(struct Word *word, size_t align) {
+    if (word->w[0]) memset(word->w[0], 0, align);
+    if (word->w[1]) memset(word->w[1], 0, align);
+    word->valid = 0;
+    word->align = align;
+    word->written = false;
+    word->accessed_by_two = false;
+    word->accessed_by = NULL;
+}
+
+Word* word_init(size_t align) {
+    Word *word = (Word *)malloc(sizeof(Word));
+    if (word == NULL) return invalid_word;
+    if(posix_memalign(&(word->w[0]), align, align) != 0) {
+        free(word);
+        return invalid_word;
+    }
+    if(posix_memalign(&(word->w[1]), align, align) != 0) {
+        free(word->w[0]);
+        free(word);
+        return invalid_word;
+    }
+    if(word->w[0] == NULL || word->w[1] == NULL) {
+        free(word->w[0]);
+        free(word->w[1]);
+        free(word);
+        return invalid_word;
+    }
+    word_clean(word, align);
+    return word;
+}
+
+void word_free(Word *word) {
+    if (word == NULL) return;
+    free(word->w[0]);
+    free(word->w[1]);
+    free(word);
+}
+
+
+struct segment_node {
+    segment_node* prev;
+    segment_node* next;
+    //pointer to the word list pointer
+    Word** word_list;
+    int word_length;
+};
+static segment_node* const invalid_segment_node = NULL;
+typedef struct segment_node* segment_list;
+
+segment_node* segment_node_init(size_t size, size_t align) {
+    segment_node *node = (segment_node *)malloc(sizeof(segment_node));
+    if (node == NULL) return invalid_segment_node;
+    node->word_length = size / align;
+    node->p = (Word **)malloc(sizeof(Word *) * node->word_length);
+    if (node->p == NULL) {
+        free(node);
+        return invalid_segment_node;
+    }
+    for (int i = 0; i < node->word_length; i++) {
+        node->p[i] = word_init(align);
+        if (node->p[i] == NULL) {
+            for (int j = 0; j < i; j++) {
+                word_free(node->p[j]);
+            }
+            free(node->p);
+            free(node);
+            return invalid_segment_node;
+        }
+    }
+    node->prev = NULL;
+    node->next = NULL;
+    return node;
+}
+
+void segment_node_free(segment_node *node) {
+    if (node == NULL) return;
+    for (int i = 0; i < node->word_length; i++) {
+        word_free(node->p[i]);
+    }
+    free(node->p);
+    free(node);
+}
+
+struct tx_t {
+    //whether it's read only
+    bool is_ro;
+    // shared memory region associated with the transaction
+    shared_t shared;
+};
+
+struct region {
+    void* start;
+    segment_list allocs;
+    size_t size;
+    size_t align;
+};
 /** Create (i.e. allocate + init) a new shared memory region, with one first non-free-able allocated segment of the requested size and alignment.
  * @param size  Size of the first shared segment of memory to allocate (in bytes), must be a positive multiple of the alignment
  * @param align Alignment (in bytes, must be a power of 2) that the shared memory region must support
