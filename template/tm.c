@@ -171,6 +171,7 @@ void leave(Batcher *batcher, region *region) {
     batcher->remaining--;
     if (batcher->remaining == 0) {
         batcher->counter++;
+        region_word_init(region);
         pthread_cond_broadcast(&batcher->cond);
     }
     pthread_mutex_unlock(&batcher->lock);
@@ -301,8 +302,8 @@ bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
     if(transaction->aborted) {
         return false;
     }
-    Batcher* batcher = shared->batcher;
-    leave(batcher, transaction->shared);
+    region* region = (struct region*) shared;
+    leave(region->batcher, transaction->shared);
     free(transaction);
     return true;
 }
