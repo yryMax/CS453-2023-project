@@ -239,7 +239,9 @@ bool read_word(struct Word* word, Transaction* transaction, void* target) {
         memcpy(target,word->w[0],word->align);
     } else {
         bool wordWritten = atomic_load(&word->written);
+        print("%d",wordWritten);
         if(wordWritten){
+            printf("abcdefg");
             if(word->accessed_by == transaction){
                 memcpy(target,word->w[1],word->align);
             }
@@ -281,10 +283,7 @@ bool write_word(struct Word* word, Transaction* transaction, void* source) {
             transaction->aborted = true;
             return false;
         } else {
-
             memcpy(word->w[1],source,word->align);
-            return true;
-            word->written = true;
             atomic_store(&word->written, true);
             if(word->accessed_by == transaction){
                 return true;
