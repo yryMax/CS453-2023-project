@@ -128,14 +128,6 @@ void segment_node_free(struct segment_node *node) {
     free(node);
 }
 
-typedef struct Transaction {
-    //whether it's read only
-    bool is_ro;
-    // shared memory region associated with the transaction
-    shared_t shared;
-    // if_abort
-    bool aborted;
-}Transaction;
 
 typedef struct Batcher {
     int counter;
@@ -189,6 +181,18 @@ typedef struct region {
     size_t align;
     Batcher* batcher;
 }region;
+
+
+typedef struct Transaction {
+    //whether it's read only
+    bool is_ro;
+    // shared memory region associated with the transaction
+    region shared;
+    // if_abort
+    bool aborted;
+}Transaction;
+
+
 
 /** Create (i.e. allocate + init) a new shared memory region, with one first non-free-able allocated segment of the requested size and alignment.
  * @param size  Size of the first shared segment of memory to allocate (in bytes), must be a positive multiple of the alignment
@@ -262,8 +266,16 @@ size_t tm_align(shared_t unused(shared)) {
  * @return Opaque transaction ID, 'invalid_tx' on failure
 **/
 tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
-    // TODO: tm_begin(shared_t)
-    return invalid_tx;
+    Transaction* transaction = (struct Transaction*) malloc(sizeof(Transaction));
+    if(transaction == NULL) {
+        return invalid_tx;
+    }
+    transaction->is_ro = is_ro;
+    transaction->shared = (struct region*) shared;
+    transaction->aborted = false;
+    Batcher* batcher = shared->batcher;
+    enter(batcher);
+    return transaction;
 }
 
 /** [thread-safe] End the given transaction.
@@ -272,8 +284,14 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
  * @return Whether the whole transaction committed
 **/
 bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
-    // TODO: tm_end(shared_t, tx_t)
-    return false;
+    Transaction* transaction = (struct Transaction*) tx;
+    if(transaction->aborted) {
+        return false;
+    }
+    Batcher* batcher = shared->batcher;
+    leave(batcher);
+    free(transaction);
+    return true;
 }
 
 /** [thread-safe] Read operation in the given transaction, source in the shared region and target in a private region.
