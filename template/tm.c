@@ -141,6 +141,7 @@ void segment_node_free(struct segment_node *node) {
 typedef struct Batcher {
     atomic_int counter;
     atomic_int remaining;
+    atomic_int blocked;
     pthread_mutex_t lock;
     pthread_cond_t cond;
 }Batcher;
@@ -156,6 +157,7 @@ typedef struct region {
 void Batcher_init(Batcher *batcher) {
     atomic_store(&batcher->counter, 0);
     atomic_store(&batcher->remaining, 0);
+    atomic_store(&batcher->blocked, 0);
     pthread_mutex_init(&batcher->lock, NULL);
     pthread_cond_init(&batcher->cond, NULL);
 }
@@ -169,7 +171,7 @@ void enter(Batcher *batcher) {
     if (atomic_load(&batcher->remaining) == 0) {
         atomic_store(&batcher->remaining, 1);
     } else {
-        atomic_fetch_add(&batcher->remaining, 1);
+        atomic_fetch_add(&batcher->blocked, 1);
         pthread_cond_wait(&batcher->cond, &batcher->lock);
     }
     pthread_mutex_unlock(&batcher->lock);
@@ -180,6 +182,8 @@ void leave(Batcher *batcher, region *region) {
     atomic_fetch_sub(&batcher->remaining, 1);
     if (atomic_load(&batcher->remaining) == 0) {
         atomic_fetch_add(&batcher->counter, 1);
+        atomic_store(&batcher->remaining, atomic_load(&batcher->blocked));
+        atomic_store(&batcher->blocked, 0);
         region_word_init(region);
         pthread_cond_broadcast(&batcher->cond);
     }
@@ -360,7 +364,8 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
     transaction->is_ro = is_ro;
     transaction->shared = (struct region*) shared;
     transaction->aborted = false;
-    printf("%d\n", atomic_load(&(transaction->shared->batcher->remaining)));
+    // print batcher conter + remaining + blocked
+    printf("counter: %d, remaining: %d, blocked: %d\n", atomic_load(&transaction->shared->batcher->counter), atomic_load(&transaction->shared->batcher->remaining), atomic_load(&transaction->shared->batcher->blocked));
     enter(transaction->shared->batcher);
     return transaction;
 }
@@ -371,12 +376,14 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
  * @return Whether the whole transaction committed
 **/
 bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
-    printf("LEAVING!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+    printf("tm_end\n");
     Transaction* transaction = (struct Transaction*) tx;
     region* region = (struct region*) shared;
+    printf("counter: %d, remaining: %d, blocked: %d\n", atomic_load(&transaction->shared->batcher->counter), atomic_load(&transaction->shared->batcher->remaining), atomic_load(&transaction->shared->batcher->blocked));
     leave(region->batcher, transaction->shared);
+    bool res = transaction->aborted;
     free(transaction);
-    return !transaction->aborted;
+    return !res;
 }
 
 /** [thread-safe] Read operation in the given transaction, source in the shared region and target in a private region.
@@ -388,7 +395,7 @@ bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
  * @return Whether the whole transaction can continue
 **/
 bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) {
- //   printf("tm_read\n");
+   // printf("tm_read\n");
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
@@ -400,7 +407,7 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
     int duration = size / region->align;
     struct segment_node* node = NULL;
 
-  //  printf("start_index: %d, duration: %d, segment_index: %d\n", start_index, duration, segment_index);
+   // printf("start_index: %d, duration: %d, segment_index: %d\n", start_index, duration, segment_index);
     if(segment_index == 0) {
         node = region->start;
     } else {
@@ -426,7 +433,7 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
  * @return Whether the whole transaction can continue
 **/
 bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) {
- //   printf("tm_write\n");
+//    printf("tm_write\n");
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
