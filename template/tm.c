@@ -136,6 +136,14 @@ typedef struct Batcher {
     pthread_cond_t cond;
 }Batcher;
 
+typedef struct region {
+    segment_list start;
+    segment_list allocs;
+    size_t size;
+    size_t align;
+    Batcher* batcher;
+}region;
+
 void Batcher_init(Batcher *batcher) {
     batcher->counter = 0;
     batcher->remaining = 0;
@@ -147,7 +155,7 @@ int get_epoch(Batcher *batcher) {
     return batcher->counter;
 }
 
-void enter(Batcher *batcher, region *region) {
+void enter(Batcher *batcher) {
     pthread_mutex_lock(&batcher->lock);
     if (batcher->remaining == 0) {
         batcher->remaining = 1;
@@ -174,30 +182,26 @@ void batcher_destroy(Batcher *batcher) {
     free(batcher);
 }
 
-typedef struct region {
-    segment_list start;
-    segment_list allocs;
-    size_t size;
-    size_t align;
-    Batcher* batcher;
-}region;
+
 
 void region_word_init(region* region){
-    segment_list node = region->start;
-    while(node != NULL) {
-        for (int i = 0; i < node->word_length; i++) {
-            word_clean(node->p[i], region->align);
-        }
-        node = node->next;
+    for (int i = 0; i < region->start->word_length; i++) {
+        word_clean(region->start->p[i], region->align);
     }
-    
+    segment_list nodes = region->allocs;
+    while(nodes != NULL) {
+        for (int i = 0; i < nodes->word_length; i++) {
+            word_clean(nodes->p[i], region->align);
+        }
+        nodes = nodes->next;
+    }
 }
 
 typedef struct Transaction {
     //whether it's read only
     bool is_ro;
     // shared memory region associated with the transaction
-    region shared;
+    region* shared;
     // if_abort
     bool aborted;
 }Transaction;
@@ -283,8 +287,7 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
     transaction->is_ro = is_ro;
     transaction->shared = (struct region*) shared;
     transaction->aborted = false;
-    Batcher* batcher = shared->batcher;
-    enter(batcher);
+    enter(transaction->shared->batcher);
     return transaction;
 }
 
@@ -299,7 +302,7 @@ bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
         return false;
     }
     Batcher* batcher = shared->batcher;
-    leave(batcher);
+    leave(batcher, transaction->shared);
     free(transaction);
     return true;
 }
