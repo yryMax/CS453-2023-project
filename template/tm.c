@@ -147,7 +147,7 @@ int get_epoch(Batcher *batcher) {
     return batcher->counter;
 }
 
-void enter(Batcher *batcher) {
+void enter(Batcher *batcher, region *region) {
     pthread_mutex_lock(&batcher->lock);
     if (batcher->remaining == 0) {
         batcher->remaining = 1;
@@ -158,7 +158,7 @@ void enter(Batcher *batcher) {
     pthread_mutex_unlock(&batcher->lock);
 }
 
-void leave(Batcher *batcher) {
+void leave(Batcher *batcher, region *region) {
     pthread_mutex_lock(&batcher->lock);
     batcher->remaining--;
     if (batcher->remaining == 0) {
@@ -182,6 +182,16 @@ typedef struct region {
     Batcher* batcher;
 }region;
 
+void region_word_init(region* region){
+    segment_list node = region->start;
+    while(node != NULL) {
+        for (int i = 0; i < node->word_length; i++) {
+            word_clean(node->p[i], region->align);
+        }
+        node = node->next;
+    }
+    
+}
 
 typedef struct Transaction {
     //whether it's read only
