@@ -37,9 +37,9 @@ struct Word {
     // length of each word
     size_t align;
     //whether the word has been written in the current epoch
-    bool written;
+    atomic_bool written;
     //whether they are 2 transactions has accessed the word in the current epoch
-    bool accessed_by_two;
+    atomic_bool accessed_by_two;
     //which transaction has accessed the word in the current epoch
     tx_t accessed_by;
 };
@@ -168,6 +168,8 @@ int get_epoch(Batcher *batcher) {
 
 void enter(Batcher *batcher) {
     pthread_mutex_lock(&batcher->lock);
+   //printf("entering\n");
+   // printf("counter: %d, remaining: %d, blocked: %d\n", atomic_load(&batcher->counter), atomic_load(&batcher->remaining), atomic_load(&batcher->blocked));
     if (atomic_load(&batcher->remaining) == 0) {
         atomic_store(&batcher->remaining, 1);
     } else {
@@ -179,14 +181,22 @@ void enter(Batcher *batcher) {
 
 void leave(Batcher *batcher, region *region) {
     pthread_mutex_lock(&batcher->lock);
+   // printf("leaving\n");
+   // printf("counter: %d, remaining: %d, blocked: %d\n", atomic_load(&batcher->counter), atomic_load(&batcher->remaining), atomic_load(&batcher->blocked));
+
+
     atomic_fetch_sub(&batcher->remaining, 1);
     if (atomic_load(&batcher->remaining) == 0) {
         atomic_fetch_add(&batcher->counter, 1);
+        // print number of blocked
+   //     printf("blocked: %d \n", atomic_load(&batcher->blocked));
+
         atomic_store(&batcher->remaining, atomic_load(&batcher->blocked));
         atomic_store(&batcher->blocked, 0);
         region_word_init(region);
         pthread_cond_broadcast(&batcher->cond);
     }
+   // printf("bbb\n");
     pthread_mutex_unlock(&batcher->lock);
 }
 
@@ -228,7 +238,8 @@ bool read_word(struct Word* word, Transaction* transaction, void* target) {
     if(transaction->is_ro){
         memcpy(target,word->w[0],word->align);
     } else {
-        if(word->written){
+        bool wordWritten = atomic_load(&word->written);
+        if(wordWritten){
             if(word->accessed_by == transaction){
                 memcpy(target,word->w[1],word->align);
             }
@@ -243,7 +254,7 @@ bool read_word(struct Word* word, Transaction* transaction, void* target) {
             } else if(word->accessed_by == NULL){
                 word->accessed_by = transaction;
             } else {
-                word->accessed_by_two = true;
+                atomic_store(&word->accessed_by_two, true);
             }
         }
     }
@@ -251,10 +262,13 @@ bool read_word(struct Word* word, Transaction* transaction, void* target) {
 }
 
 bool write_word(struct Word* word, Transaction* transaction, void* source) {
+
     if(transaction->aborted) {
         return false;
     }
-    if(word->written){
+    bool wordWritten = atomic_load(&word->written);
+    if(wordWritten){
+
         if(word->accessed_by == transaction){
             memcpy(word->w[1],source,word->align);
         }
@@ -267,14 +281,17 @@ bool write_word(struct Word* word, Transaction* transaction, void* source) {
             transaction->aborted = true;
             return false;
         } else {
+
             memcpy(word->w[1],source,word->align);
+            return true;
             word->written = true;
+            atomic_store(&word->written, true);
             if(word->accessed_by == transaction){
                 return true;
             } else if(word->accessed_by == NULL){
                 word->accessed_by = transaction;
             } else {
-                word->accessed_by_two = true;
+                atomic_store(&word->accessed_by_two, true);
             }
         }
     }
@@ -288,7 +305,7 @@ bool write_word(struct Word* word, Transaction* transaction, void* source) {
  * @return Opaque shared memory region handle, 'invalid_shared' on failure
 **/
 shared_t tm_create(size_t unused(size), size_t unused(align)) {
-    printf("tm_create\n");
+ //   printf("tm_create\n");
     struct region* region = (struct region*) malloc(sizeof(struct region));
     if(region == NULL) {
         return invalid_shared;
@@ -314,7 +331,7 @@ shared_t tm_create(size_t unused(size), size_t unused(align)) {
  * @param shared Shared memory region to destroy, with no running transaction
 **/
 void tm_destroy(shared_t unused(shared)) {
-    printf("tm_destroy\n");
+  //  printf("tm_destroy\n");
     struct region* region = (struct region*) shared;
     segment_node_free(region->start);
     while(region->allocs != NULL) {
@@ -356,7 +373,7 @@ size_t tm_align(shared_t unused(shared)) {
  * @return Opaque transaction ID, 'invalid_tx' on failure
 **/
 tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
-    printf("tm_begin\n");
+   // printf("tm_begin\n");
     Transaction* transaction = (struct Transaction*) malloc(sizeof(Transaction));
     if(transaction == NULL) {
         return invalid_tx;
@@ -365,7 +382,7 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
     transaction->shared = (struct region*) shared;
     transaction->aborted = false;
     // print batcher conter + remaining + blocked
-    printf("counter: %d, remaining: %d, blocked: %d\n", atomic_load(&transaction->shared->batcher->counter), atomic_load(&transaction->shared->batcher->remaining), atomic_load(&transaction->shared->batcher->blocked));
+ //   printf("counter: %d, remaining: %d, blocked: %d\n", atomic_load(&transaction->shared->batcher->counter), atomic_load(&transaction->shared->batcher->remaining), atomic_load(&transaction->shared->batcher->blocked));
     enter(transaction->shared->batcher);
     return transaction;
 }
@@ -376,11 +393,13 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
  * @return Whether the whole transaction committed
 **/
 bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
-    printf("tm_end\n");
+  //  printf("tm_end\n");
     Transaction* transaction = (struct Transaction*) tx;
     region* region = (struct region*) shared;
-    printf("counter: %d, remaining: %d, blocked: %d\n", atomic_load(&transaction->shared->batcher->counter), atomic_load(&transaction->shared->batcher->remaining), atomic_load(&transaction->shared->batcher->blocked));
+
+   // printf("qqqqqqqqqqqqqq\n");
     leave(region->batcher, transaction->shared);
+ //   printf("rrrrrrrrrrrrrr\n");
     bool res = transaction->aborted;
     free(transaction);
     return !res;
@@ -395,7 +414,7 @@ bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
  * @return Whether the whole transaction can continue
 **/
 bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) {
-   // printf("tm_read\n");
+    //printf("tm_read\n");
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
@@ -407,7 +426,7 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
     int duration = size / region->align;
     struct segment_node* node = NULL;
 
-   // printf("start_index: %d, duration: %d, segment_index: %d\n", start_index, duration, segment_index);
+//   printf("start_index: %d, duration: %d, segment_index: %d\n", start_index, duration, segment_index);
     if(segment_index == 0) {
         node = region->start;
     } else {
@@ -433,7 +452,8 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
  * @return Whether the whole transaction can continue
 **/
 bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) {
-//    printf("tm_write\n");
+    //printf("tm_write\n");
+
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
@@ -444,8 +464,8 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(sourc
     int start_index = offset_size / region->align;
     int duration = size / region->align;
     struct segment_node* node = NULL;
-    //print start_index and duration and segment_index
- //   printf("start_index: %d, duration: %d, segment_index: %d\n", start_index, duration, segment_index);
+    //print start_index and duration and segment_index and segment_length
+
     if(segment_index == 0) {
         node = region->start;
     } else {
@@ -455,6 +475,8 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(sourc
             node = node->next;
         }
     }
+   // printf("start_index: %d, duration: %d, segment_index: %d word length: %d\n", start_index,
+      //    duration, segment_index, node->word_length);
     for(int i = start_index; i < start_index + duration; i++) {
         if(!write_word(node->p[i], transaction, source + (i - start_index) * region->align)) {
             return false;
