@@ -28,8 +28,9 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <stdatomic.h>
 struct Word {
+    //w[0] is readable and w[1] is writable
     void* w[2];
     //which copy is valid from the previous epoch
     int valid;
@@ -45,8 +46,7 @@ struct Word {
 static struct Word* const invalid_word = NULL;
 
 void word_clean(struct Word *word, size_t align) {
-    if (word->w[0]) memset(word->w[0], 0, align);
-    if (word->w[1]) memset(word->w[1], 0, align);
+    if(word->written)word->w[0] = word->w[1];
     word->valid = 0;
     word->align = align;
     word->written = false;
@@ -83,14 +83,18 @@ void word_free(struct Word *word) {
     free(word);
 }
 
-
+//atomic global cnt
+static atomic_int cnt = 0;
 struct segment_node {
     struct segment_node* prev;
     struct segment_node* next;
     //pointer to the word list pointer
     struct Word** p;
+    int node_id;
     int word_length;
 };
+
+
 static struct segment_node* const invalid_segment_node = NULL;
 typedef struct segment_node* segment_list;
 
@@ -114,6 +118,7 @@ struct segment_node* segment_node_init(size_t size, size_t align) {
             return invalid_segment_node;
         }
     }
+    node->node_id = atomic_fetch_add(&cnt, 1);
     node->prev = NULL;
     node->next = NULL;
     return node;
@@ -256,7 +261,7 @@ void tm_destroy(shared_t unused(shared)) {
  * @return Start address of the first allocated segment
 **/
 void* tm_start(shared_t unused(shared)) {
-    return ((struct region*) shared)->start;
+    return 0;
 }
 
 /** [thread-safe] Return the size (in bytes) of the first allocated segment of the shared memory region.
@@ -368,11 +373,12 @@ alloc_t tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size), 
  * @param target Address of the first byte of the previously allocated segment to deallocate
  * @return Whether the whole transaction can continue
 **/
-bool tm_free(shared_t unused(shared), tx_t unused(tx), void* unused(target)) {
+bool tm_free(shared_t unused(shared), tx_t unused(tx), void** unused(target)) {
     struct segment_node* node = (struct segment_node*) target;
     if(node->prev) node->prev->next = node->next;
     else ((struct region*) shared)->allocs = node->next;
     if(node->next) node->next->prev = node->prev;
     segment_node_free(node);
+    *target = node->id << (48);
     return true;
 }
