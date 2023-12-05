@@ -232,6 +232,7 @@ typedef struct Transaction {
 
 
 bool read_word(struct Word* word, Transaction* transaction, void* target) {
+  //  printf("read_word");
     if(transaction->aborted) {
         return false;
     }
@@ -239,9 +240,8 @@ bool read_word(struct Word* word, Transaction* transaction, void* target) {
         memcpy(target,word->w[0],word->align);
     } else {
         bool wordWritten = atomic_load(&word->written);
-        print("%d",wordWritten);
+   //     print("%d",wordWritten);
         if(wordWritten){
-            printf("abcdefg");
             if(word->accessed_by == transaction){
                 memcpy(target,word->w[1],word->align);
             }
@@ -264,7 +264,6 @@ bool read_word(struct Word* word, Transaction* transaction, void* target) {
 }
 
 bool write_word(struct Word* word, Transaction* transaction, void* source) {
-
     if(transaction->aborted) {
         return false;
     }
@@ -284,9 +283,12 @@ bool write_word(struct Word* word, Transaction* transaction, void* source) {
             return false;
         } else {
             memcpy(word->w[1],source,word->align);
+
             atomic_store(&word->written, true);
+
             if(word->accessed_by == transaction){
                 return true;
+                printf("I am here\n");
             } else if(word->accessed_by == NULL){
                 word->accessed_by = transaction;
             } else {
