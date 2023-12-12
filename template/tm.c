@@ -27,6 +27,7 @@
 #include "macros.h"
 #include <pthread.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdatomic.h>
 struct Word {
@@ -41,7 +42,7 @@ struct Word {
     //whether they are 2 transactions has accessed the word in the current epoch
     atomic_bool accessed_by_two;
     //which transaction has accessed the word in the current epoch
-    tx_t accessed_by;
+    int accessed_by;
 };
 static struct Word* const invalid_word = NULL;
 
@@ -51,7 +52,7 @@ void word_clean(struct Word *word, size_t align) {
     word->align = align;
     word->written = false;
     word->accessed_by_two = false;
-    word->accessed_by = NULL;
+    word->accessed_by = -1;
 }
 
 struct Word* word_init(size_t align) {
@@ -76,7 +77,7 @@ struct Word* word_init(size_t align) {
     word->align = align;
     word->written = false;
     word->accessed_by_two = false;
-    word->accessed_by = NULL;
+    word->accessed_by = -1;
     return word;
 }
 
@@ -221,6 +222,7 @@ void region_word_init(region* region){
     }
 }
 
+atomic_int tid = 0;
 typedef struct Transaction {
     //whether it's read only
     bool is_ro;
@@ -228,6 +230,8 @@ typedef struct Transaction {
     region* shared;
     // if_abort
     bool aborted;
+    // id
+    int id;
 }Transaction;
 
 
@@ -242,7 +246,7 @@ bool read_word(struct Word* word, Transaction* transaction, void* target) {
         bool wordWritten = atomic_load(&word->written);
    //     print("%d",wordWritten);
         if(wordWritten){
-            if(word->accessed_by == transaction){
+            if(word->accessed_by == transaction->id){
                 memcpy(target,word->w[1],word->align);
             }
             else{
@@ -251,10 +255,10 @@ bool read_word(struct Word* word, Transaction* transaction, void* target) {
             }
         } else {
             memcpy(target,word->w[0],word->align);
-            if(word->accessed_by == transaction){
+            if(word->accessed_by == transaction->id){
                 return true;
-            } else if(word->accessed_by == NULL){
-                word->accessed_by = transaction;
+            } else if(word->accessed_by == -1){
+                word->accessed_by = transaction->id;
             } else {
                 atomic_store(&word->accessed_by_two, true);
             }
@@ -264,13 +268,14 @@ bool read_word(struct Word* word, Transaction* transaction, void* target) {
 }
 
 bool write_word(struct Word* word, Transaction* transaction, void* source) {
+    printf("write_word");
     if(transaction->aborted) {
         return false;
     }
     bool wordWritten = atomic_load(&word->written);
     if(wordWritten){
 
-        if(word->accessed_by == transaction){
+        if(word->accessed_by == transaction->id){
             memcpy(word->w[1],source,word->align);
         }
         else{
@@ -286,11 +291,11 @@ bool write_word(struct Word* word, Transaction* transaction, void* source) {
 
             atomic_store(&word->written, true);
 
-            if(word->accessed_by == transaction){
+            if(word->accessed_by == transaction->id){
                 return true;
                 printf("I am here\n");
-            } else if(word->accessed_by == NULL){
-                word->accessed_by = transaction;
+            } else if(word->accessed_by == -1){
+                word->accessed_by = transaction->id;
             } else {
                 atomic_store(&word->accessed_by_two, true);
             }
@@ -382,8 +387,8 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
     transaction->is_ro = is_ro;
     transaction->shared = (struct region*) shared;
     transaction->aborted = false;
-    // print batcher conter + remaining + blocked
- //   printf("counter: %d, remaining: %d, blocked: %d\n", atomic_load(&transaction->shared->batcher->counter), atomic_load(&transaction->shared->batcher->remaining), atomic_load(&transaction->shared->batcher->blocked));
+    //atomiclly add tid
+    transaction->id = atomic_fetch_add(&tid, 1);
     enter(transaction->shared->batcher);
     return transaction;
 }
