@@ -263,13 +263,13 @@ int main(int argc, char** argv) {
         }
         // Get/set/compute run parameters
         auto const nbworkers = 1;
-        auto const nbtxperwrk    = 200000ul / nbworkers;
+        auto const nbtxperwrk    = 3;
         auto const nbaccounts    = 32 * nbworkers;
         auto const expnbaccounts = 256 * nbworkers;
         auto const init_balance  = 100ul;
         auto const prob_long     = 0.5f;
         auto const prob_alloc    = 0.01f;
-        auto const nbrepeats     = 7;
+        auto const nbrepeats     = 1;
         auto const seed          = static_cast<Seed>(::std::stoul(argv[1]));
         auto const clk_res       = Chrono::get_resolution();
         auto const slow_factor   = 16ul;

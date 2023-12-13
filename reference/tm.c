@@ -122,6 +122,7 @@ size_t tm_align(shared_t shared) {
 }
 
 tx_t tm_begin(shared_t shared, bool is_ro) {
+    printf("tm_begin\n");
     // We let read-only transactions run in parallel by acquiring a shared
     // access. On the other hand, read-write transactions acquire an exclusive
     // access. At any point in time, the lock can be shared between any number
@@ -154,11 +155,14 @@ bool tm_end(shared_t shared, tx_t tx) {
 
 // Note: "unused" is a macro that tells the compiler that a variable is unused.
 bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* source, size_t size, void* target) {
+
     memcpy(target, source, size);
+    printf("tm_read source: %p target: %p target value: %ld\n", source,target,*(uint64_t *)target);
     return true;
 }
 
 bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* source, size_t size, void* target) {
+    printf("tm_write source: %p target: %p source value: %ld\n", source,target,*(uint64_t *)source);
     memcpy(target, source, size);
     return true;
 }
