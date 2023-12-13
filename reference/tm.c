@@ -148,6 +148,7 @@ bool tm_end(shared_t shared, tx_t tx) {
     } else {
         shared_lock_release(&(((struct region*) shared)->lock));
     }
+    printf("tm_end\n");
     return true;
 }
 
