@@ -70,7 +70,7 @@ void word_free(struct Word *word) {
 }
 
 //atomic global cnt
-static atomic_int cnt = 2;
+atomic_int cnt = 1;
 struct segment_node {
     struct segment_node* prev;
     struct segment_node* next;
@@ -415,12 +415,12 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
     int64_t start_index = offset_size / region->align;
     int64_t duration = size / region->align;
     struct segment_node* node = NULL;
-  //  printf("segment_index: %d start_index: %d\n", segment_index, start_index);
+    //printf("reading segment_index: %d start_index: %d\n", segment_index, start_index);
     if(segment_index == 1) {
         node = region->start;
     } else {
         node = region->allocs;
-        for(int i = 0; i < segment_index - 1; i++) {
+        while(node!=NULL && node->node_id != segment_index) {
             node = node->next;
         }
     }
@@ -445,7 +445,7 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
  * @return Whether the whole transaction can continue
 **/
 bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) {
-  //  printf("tm_write source: %p target: %d source value: %ld\n", source,target,*(uint64_t *)source);
+
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
@@ -457,13 +457,16 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(sourc
     int64_t start_index = offset_size / region->align;
     int64_t duration = size / region->align;
     struct segment_node* node = NULL;
+ //   printf("writing segment_index: %d start_index: %d\n", segment_index, start_index);
     if(segment_index == 1) {
         node = region->start;
     } else {
+
         node = region->allocs;
-        for(int i = 0; i < segment_index - 1; i++) {
+        while(node!=NULL && node->node_id != segment_index) {
             node = node->next;
         }
+        //printf("im here writing\n");
     }
     for(int i = start_index; i < start_index + duration; i++) {
         if(!write_word(node->p[i], transaction, source + (i - start_index) * region->align, node->Wordp + i * 2 * region->align)) {
@@ -472,7 +475,7 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(sourc
             return false;
         }
     }
-
+    //printf("tm_write source: %p target: %d source value: %ld\n", source,target,*(uint64_t *)source);
     return true;
 }
 
@@ -484,7 +487,7 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(sourc
  * @return Whether the whole transaction can continue (success/nomem), or not (abort_alloc)
 **/
 alloc_t tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size), void** unused(target)) {
-    printf("tm_alloc\n");
+   // printf("tm_alloc\n");
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return abort_alloc;
@@ -515,15 +518,20 @@ alloc_t tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size), 
  * @return Whether the whole transaction can continue
 **/
 bool tm_free(shared_t unused(shared), tx_t unused(tx), void* unused(target)) {
-    printf("tm_free\n");
+   // printf("tm_free\n");
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
     }
-    struct segment_node* node = (struct segment_node*) target;
+    int64_t segment_index = (int64_t) target >> (48);
+    struct segment_node* node = ((struct region*) shared)->allocs;
+    while(node!=NULL && node->node_id != segment_index) {
+        node = node->next;
+    }
     if(node->prev) node->prev->next = node->next;
     else ((struct region*) shared)->allocs = node->next;
     if(node->next) node->next->prev = node->prev;
     segment_node_free(node);
+ //   printf("tm_free success\n");
     return true;
 }
