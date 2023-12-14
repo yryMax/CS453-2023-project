@@ -269,7 +269,7 @@ bool read_word(struct Word* word, Transaction* transaction, char* target, void* 
         bool wordWritten = atomic_load(&word->written);
         if(wordWritten){
 
-            if(word->accessed_by == transaction->id){
+            if(atomic_load(&word->accessed_by) == transaction->id){
                 memcpy(target,wordp + word->align,word->align);
             }
             else{
@@ -281,10 +281,10 @@ bool read_word(struct Word* word, Transaction* transaction, char* target, void* 
             }
         } else {
             memcpy(target,wordp,word->align);
-            if(word->accessed_by == transaction->id){
+            if(atomic_load(&word->accessed_by) == transaction->id){
                 return true;
-            } else if(word->accessed_by == -1){
-                word->accessed_by = transaction->id;
+            } else if(atomic_load(&word->accessed_by) == -1){
+                atomic_store(&word->accessed_by, transaction->id);
             } else {
                 atomic_store(&word->accessed_by_two, true);
             }
@@ -299,7 +299,7 @@ bool write_word(struct Word* word, Transaction* transaction, char* source, void*
     }
     bool wordWritten = atomic_load(&word->written);
     if(wordWritten){
-        if(word->accessed_by == transaction->id){
+        if(atomic_load(&word->accessed_by) == transaction->id){
             memcpy(wordp + word->align,source,word->align);
         }
         else{
