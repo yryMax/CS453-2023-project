@@ -23,25 +23,28 @@
 // External headers
 
 // Internal headers
-#include <tm.h>
+#include <tm.hpp>
 #include "macros.h"
+#include <thread>
 #include <pthread.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdatomic.h>
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <atomic>
+using namespace std;
+
 
 struct Word {
     // length of each word
     size_t align;
     //whether the word has been written in the current epoch
-    atomic_bool written;
+    atomic<int> written;
     //whether they are 2 transactions has accessed the word in the current epoch
-    atomic_bool accessed_by_two;
+    atomic<bool> accessed_by_two;
     //which transaction has accessed the word in the current epoch
-    atomic_int accessed_by;
+    atomic<int> accessed_by;
     //if the written word is aborted
-    atomic_bool aborted;
+    atomic<bool> aborted;
 };
 static struct Word* const invalid_word = NULL;
 
@@ -74,13 +77,13 @@ void word_free(struct Word *word) {
 }
 
 //atomic global cnt
-atomic_int cnt = 1;
+atomic<int> cnt = 1;
 struct segment_node {
     struct segment_node* prev;
     struct segment_node* next;
     struct Word** p;
     void* Wordp;
-    int64_t node_id;
+    long long node_id;
     int word_length;
     bool free_flag;
 };
@@ -153,17 +156,17 @@ typedef struct region {
     size_t align;
     Batcher* batcher;
 }region;
-
+void region_word_init(region* region);
 void Batcher_init(Batcher *batcher) {
-    atomic_store(&batcher->counter, 0);
-    atomic_store(&batcher->remaining, 0);
-    atomic_store(&batcher->blocked, 0);
+    batcher->counter = 0;
+    batcher->remaining = 0;
+    batcher->blocked = 0;
     pthread_mutex_init(&batcher->lock, NULL);
     pthread_cond_init(&batcher->cond, NULL);
 }
 
 int get_epoch(Batcher *batcher) {
-    return atomic_load(&batcher->counter);
+    return batcher->counter;
 }
 
 void enter(Batcher *batcher) {
@@ -245,7 +248,7 @@ void region_word_rollback(region* region, int tid){
     }
 }
 
-atomic_int tid = 0;
+atomic<int> tid = 0;
 typedef struct Transaction {
     //whether it's read only
     bool is_ro;
@@ -329,7 +332,7 @@ bool write_word(struct Word* word, Transaction* transaction, char* source, void*
  * @param align Alignment (in bytes, must be a power of 2) that the shared memory region must support
  * @return Opaque shared memory region handle, 'invalid_shared' on failure
 **/
-shared_t tm_create(size_t unused(size), size_t unused(align)) {
+shared_t tm_create(size_t unused(size), size_t unused(align)) noexcept {
     //printf("size: %d, align: %d\n",size,align);
     struct region* region = (struct region*) malloc(sizeof(struct region));
     memset(region, 0, sizeof(struct region));
@@ -358,7 +361,7 @@ shared_t tm_create(size_t unused(size), size_t unused(align)) {
 /** Destroy (i.e. clean-up + free) a given shared memory region.
  * @param shared Shared memory region to destroy, with no running transaction
 **/
-void tm_destroy(shared_t unused(shared)) {
+void tm_destroy(shared_t unused(shared)) noexcept {
     //printf("tm_destroy");
     struct region* region = (struct region*) shared;
     segment_node_free(region->start);
@@ -375,7 +378,7 @@ void tm_destroy(shared_t unused(shared)) {
  * @param shared Shared memory region to query
  * @return Start address of the first allocated segment
 **/
-void* tm_start(shared_t unused(shared)) {
+void* tm_start(shared_t unused(shared)) noexcept {
     return (void*)(1LL<<48);
 }
 
@@ -383,7 +386,7 @@ void* tm_start(shared_t unused(shared)) {
  * @param shared Shared memory region to query
  * @return First allocated segment size
 **/
-size_t tm_size(shared_t unused(shared)) {
+size_t tm_size(shared_t unused(shared)) noexcept {
     return ((struct region*) shared)->size;
 }
 
@@ -391,7 +394,7 @@ size_t tm_size(shared_t unused(shared)) {
  * @param shared Shared memory region to query
  * @return Alignment used globally
 **/
-size_t tm_align(shared_t unused(shared)) {
+size_t tm_align(shared_t unused(shared)) noexcept {
     return ((struct region*) shared)->align;
 }
 
@@ -400,7 +403,7 @@ size_t tm_align(shared_t unused(shared)) {
  * @param is_ro  Whether the transaction is read-only
  * @return Opaque transaction ID, 'invalid_tx' on failure
 **/
-tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
+tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) noexcept {
     //printf("tm_begin\n");
     Transaction* transaction = (struct Transaction*) malloc(sizeof(Transaction));
     memset(transaction,0,sizeof (transaction));
@@ -412,7 +415,7 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
     transaction->aborted = false;
     transaction->id = atomic_fetch_add(&tid, 1);
     enter(transaction->shared->batcher);
-    return transaction;
+    return (tx_t) transaction;
 }
 
 /** [thread-safe] End the given transaction.
@@ -420,7 +423,7 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
  * @param tx     Transaction to end
  * @return Whether the whole transaction committed
 **/
-bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
+bool tm_end(shared_t unused(shared), tx_t unused(tx)) noexcept {
     Transaction* transaction = (struct Transaction*) tx;
     region* region = (struct region*) shared;
     bool res = transaction->aborted;
@@ -438,7 +441,7 @@ bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
  * @param target Target start address (in a private region)
  * @return Whether the whole transaction can continue
 **/
-bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) {
+bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) noexcept {
 
     // printf("tm_read target: %p source: %d size: %d\n", target,source, size);
     target = (char*) target;
@@ -446,11 +449,11 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
     if(transaction->aborted) {
         return false;
     }
-    int64_t segment_index = (int64_t) source >> (48);
-    int64_t offset_size = (int64_t) source & 0xffffffffffff;
+    long long segment_index = (long long) source >> (48);
+    long long offset_size = (long long) source & 0xffffffffffff;
     region* region = (struct region*) shared;
-    int64_t start_index = offset_size / region->align;
-    int64_t duration = size / region->align;
+    long long start_index = offset_size / region->align;
+    long long duration = size / region->align;
     struct segment_node* node = NULL;
     //printf("reading segment_index: %d start_index: %d\n", segment_index, start_index);
     if(segment_index == 1) {
@@ -463,7 +466,7 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
     }
     for(int i = start_index; i < start_index + duration; i++) {
         //  printf("tm_read targetn: %p\n", target);
-        if(!read_word(node->p[i], transaction, target + (i - start_index) * region->align, node->Wordp + i * 2 * region->align)) {
+        if(!read_word(node->p[i], transaction, (char *)(target + (i - start_index) * region->align), node->Wordp + i * 2 * region->align)) {
             transaction->aborted = true;
             return false;
         }
@@ -480,18 +483,18 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
  * @param target Target start address (in the shared region)
  * @return Whether the whole transaction can continue
 **/
-bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) {
+bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) noexcept {
 
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
     }
     source = (char const*) source;
-    int64_t segment_index = (int64_t) target >> (48);
-    int64_t offset_size = (int64_t) target & 0xffffffffffff;
+    long long segment_index = (long long) target >> (48);
+    long long offset_size = (long long) target & 0xffffffffffff;
     region* region = (struct region*) shared;
-    int64_t start_index = offset_size / region->align;
-    int64_t duration = size / region->align;
+    long long start_index = offset_size / region->align;
+    long long duration = size / region->align;
     struct segment_node* node = NULL;
     //   printf("writing segment_index: %d start_index: %d\n", segment_index, start_index);
     if(segment_index == 1) {
@@ -505,7 +508,7 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(sourc
         //printf("im here writing\n");
     }
     for(int i = start_index; i < start_index + duration; i++) {
-        if(!write_word(node->p[i], transaction, source + (i - start_index) * region->align, node->Wordp + i * 2 * region->align)) {
+        if(!write_word(node->p[i], transaction, (char*)(source + (i - start_index) * region->align), node->Wordp + i * 2 * region->align)) {
             //printf("aborted");
             transaction->aborted = true;
             return false;
@@ -522,16 +525,16 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(sourc
  * @param target Pointer in private memory receiving the address of the first byte of the newly allocated, aligned segment
  * @return Whether the whole transaction can continue (success/nomem), or not (abort_alloc)
 **/
-alloc_t tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size), void** unused(target)) {
+Alloc tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size), void** unused(target)) noexcept {
     // printf("tm_alloc\n");
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
-        return abort_alloc;
+        return Alloc::abort;
     }
     region* region = (struct region*) shared;
     struct segment_node* node = segment_node_init(size, region->align);
     if (node == NULL) {
-        return nomem_alloc;
+        return Alloc::nomem;
     }
     if(region->allocs == NULL) {
         region->allocs = node;
@@ -542,8 +545,8 @@ alloc_t tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size), 
         region->allocs = node;
 
     }
-    *target = node->node_id << (48);
-    return success_alloc;
+    *target = (void* )(node->node_id << (48));
+    return Alloc::success;
 }
 
 /** [thread-safe] Memory freeing in the given transaction.
@@ -552,13 +555,13 @@ alloc_t tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size), 
  * @param target Address of the first byte of the previously allocated segment to deallocate
  * @return Whether the whole transaction can continue
 **/
-bool tm_free(shared_t unused(shared), tx_t unused(tx), void* unused(target)) {
+bool tm_free(shared_t unused(shared), tx_t unused(tx), void* unused(target)) noexcept {
     // printf("tm_free\n");
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
     }
-    int64_t segment_index = (int64_t) target >> (48);
+    long long segment_index = (long long) target >> (48);
     struct segment_node* node = ((struct region*) shared)->allocs;
     while(node!=NULL && node->node_id != segment_index) {
         node = node->next;
