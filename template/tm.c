@@ -139,9 +139,9 @@ void segment_node_free(struct segment_node *node) {
 
 
 typedef struct Batcher {
-    atomic_int counter;
-    atomic_int remaining;
-    atomic_int blocked;
+    int counter;
+    int remaining;
+    int blocked;
     pthread_mutex_t lock;
     pthread_cond_t cond;
 }Batcher;
@@ -168,10 +168,10 @@ int get_epoch(Batcher *batcher) {
 
 void enter(Batcher *batcher) {
     pthread_mutex_lock(&batcher->lock);
-    if (atomic_load(&batcher->remaining) == 0) {
-        atomic_store(&batcher->remaining, 1);
+    if (batcher->remaining == 0) {
+        batcher->remaining = 1;
     } else {
-        atomic_fetch_add(&batcher->blocked, 1);
+        batcher->blocked++;
         pthread_cond_wait(&batcher->cond, &batcher->lock);
     }
     pthread_mutex_unlock(&batcher->lock);
@@ -180,12 +180,12 @@ void enter(Batcher *batcher) {
 void leave(Batcher *batcher, region *region) {
     pthread_mutex_lock(&batcher->lock);
 
-    atomic_fetch_sub(&batcher->remaining, 1);
-    if (atomic_load(&batcher->remaining) == 0) {
-        atomic_fetch_add(&batcher->counter, 1);
+    batcher->remaining--;
+    if (batcher->remaining == 0) {
+        batcher->counter++;
 
-        atomic_store(&batcher->remaining, atomic_load(&batcher->blocked));
-        atomic_store(&batcher->blocked, 0);
+        batcher->remaining = batcher->blocked;
+        batcher->blocked = 0;
         region_word_init(region);
         pthread_cond_broadcast(&batcher->cond);
     }
