@@ -153,12 +153,13 @@ typedef struct Batcher {
     pthread_cond_t cond;
 }Batcher;
 
-mutex modified_word_mutex;
+//mutex modified_word_mutex;
+
 void insert_to_modified(Batcher *batcher, long long word_addr) {
-    modified_word_mutex.lock();
+ //   modified_word_mutex.lock();
 //cout<<"insert_to_modified: "<<word_addr<<endl;
     batcher->modified_word.insert(word_addr);
-    modified_word_mutex.unlock();
+  //  modified_word_mutex.unlock();
 }
 
 
@@ -244,6 +245,10 @@ void region_word_init(region* region){
 
 
 void region_word_next(region* region){
+    //travel all the modified word
+   // cout<<region->batcher->modified_word.size()<<" ";
+
+   // cout<<endl;
     for(auto it = region->batcher->modified_word.begin(); it != region->batcher->modified_word.end(); it++) {
         long long segment_index = *it >> (48);
         long long start_index = *it & 0xffffffffffff;
@@ -496,7 +501,7 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
     struct segment_node* node = region->block[segment_index];
     for(int i = start_index; i < start_index + duration; i++) {
         long long addr = (node->node_id << (48)) + i;
-        insert_to_modified(region->batcher, addr);
+        if(transaction->is_ro == false)insert_to_modified(region->batcher, addr);
         if(!read_word(node->p[i], transaction, (char *)(target + (i - start_index) * region->align), node->Wordp + i * 2 * region->align, region->batcher)) {
             transaction->aborted = true;
             return false;
