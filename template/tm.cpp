@@ -33,6 +33,8 @@
 #include <atomic>
 #include <map>
 #include <iostream>
+#include <set>
+#include <mutex>
 using namespace std;
 
 
@@ -47,6 +49,7 @@ struct Word {
     atomic<int> accessed_by;
     //if the written word is aborted
     atomic<bool> aborted;
+    long long addr;
 
 };
 static struct Word* const invalid_word = NULL;
@@ -145,9 +148,19 @@ typedef struct Batcher {
     int counter;
     int remaining;
     int blocked;
+    set<long long>modified_word;
     pthread_mutex_t lock;
     pthread_cond_t cond;
 }Batcher;
+
+mutex modified_word_mutex;
+void insert_to_modified(Batcher *batcher, long long word_addr) {
+    modified_word_mutex.lock();
+//cout<<"insert_to_modified: "<<word_addr<<endl;
+    batcher->modified_word.insert(word_addr);
+    modified_word_mutex.unlock();
+}
+
 
 typedef struct region {
     map<long long, struct segment_node*> block;
@@ -157,10 +170,12 @@ typedef struct region {
 }region;
 
 void region_word_init(region* region);
+void region_word_next(region* region);
 void Batcher_init(Batcher *batcher) {
     batcher->counter = 0;
     batcher->remaining = 0;
     batcher->blocked = 0;
+    batcher->modified_word = set<long long>();
     pthread_mutex_init(&batcher->lock, NULL);
     pthread_cond_init(&batcher->cond, NULL);
 }
@@ -189,7 +204,8 @@ void leave(Batcher *batcher, region *region) {
 
         batcher->remaining = batcher->blocked;
         batcher->blocked = 0;
-        region_word_init(region);
+        region_word_next(region);
+        batcher->modified_word.clear();
         pthread_cond_broadcast(&batcher->cond);
     }
     pthread_mutex_unlock(&batcher->lock);
@@ -198,6 +214,8 @@ void leave(Batcher *batcher, region *region) {
 void batcher_destroy(Batcher *batcher) {
     pthread_mutex_destroy(&batcher->lock);
     pthread_cond_destroy(&batcher->cond);
+    //free modified_word
+    batcher->modified_word.clear();
     free(batcher);
 }
 
@@ -215,25 +233,58 @@ void region_word_init(region* region){
         }
         for (int i = 0; i < node->word_length; i++) {
             word_clean(node->p[i], node->Wordp + i * 2 * region->align, region->align);
+            long long addr = (node->node_id << (48)) + i;
+            node->p[i]->addr = addr;
         }
         ++it;
     }
 
 }
+
+
+
+void region_word_next(region* region){
+    for(auto it = region->batcher->modified_word.begin(); it != region->batcher->modified_word.end(); it++) {
+        long long segment_index = *it >> (48);
+        long long start_index = *it & 0xffffffffffff;
+        struct segment_node* node = region->block[segment_index];
+        if(node == NULL) {
+            continue;
+        }
+        word_clean(node->p[start_index], node->Wordp + start_index * 2 * region->align, region->align);
+    }
+
+    for(auto it = region->block.begin(); it != region->block.end();) {
+        struct segment_node* node = it->second;
+        if (node->free_flag) {
+            it = region->block.erase(it);
+            segment_node_free(node);
+            continue;
+        }
+        ++it;
+    }
+
+}
+
+
+
 void word_rollback(struct Word* word, int tid) {
     //atomic check
     if(atomic_load(&word->written) && atomic_load(&word->accessed_by) == tid) {
-        // printf("Dirty Word!!!!!!!!!!!!!!!!\n");
         word->aborted = true;
     }
 }
 
 void region_word_rollback(region* region, int tid){
-    for(auto it = region->block.begin(); it != region->block.end(); it++) {
-        struct segment_node *nodes = it->second;
-        for (int i = 0; i < nodes->word_length; i++) {
-            word_rollback(nodes->p[i], tid);
+    //travel all the modified word
+    for(auto it = region->batcher->modified_word.begin(); it != region->batcher->modified_word.end(); it++) {
+        long long segment_index = *it >> (48);
+        long long start_index = *it & 0xffffffffffff;
+        struct segment_node* node = region->block[segment_index];
+        if(node == NULL) {
+            continue;
         }
+        word_rollback(node->p[start_index], tid);
     }
 }
 
@@ -250,11 +301,10 @@ typedef struct Transaction {
 }Transaction;
 
 
-bool read_word(struct Word* word, Transaction* transaction, char* target, void* wordp) {
+bool read_word(struct Word* word, Transaction* transaction, char* target, void* wordp, Batcher* batcher) {
     if(transaction->aborted) {
         return false;
     }
-    //printf("word readale copy contains: %d\n", *(int*)word->w[0]);
     if(transaction->is_ro){
         memcpy(target,wordp,word->align);
     } else {
@@ -266,7 +316,6 @@ bool read_word(struct Word* word, Transaction* transaction, char* target, void* 
             }
             else{
                 transaction->aborted = true;
-                //rollback
                 region_word_rollback(transaction->shared, transaction->id);
                 leave(transaction->shared->batcher, transaction->shared);
                 return false;
@@ -285,7 +334,7 @@ bool read_word(struct Word* word, Transaction* transaction, char* target, void* 
     return true;
 }
 
-bool write_word(struct Word* word, Transaction* transaction, char* source, void* wordp) {
+bool write_word(struct Word* word, Transaction* transaction, char* source, void* wordp, Batcher* batcher) {
     if(transaction->aborted) {
         return false;
     }
@@ -433,7 +482,7 @@ bool tm_end(shared_t unused(shared), tx_t unused(tx)) noexcept {
  * @return Whether the whole transaction can continue
 **/
 bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) noexcept {
-    //cout<<"tm_read"<<endl;
+   //cout<<"tm_read"<<endl;
     target = (char*) target;
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
@@ -446,8 +495,9 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
     long long duration = size / region->align;
     struct segment_node* node = region->block[segment_index];
     for(int i = start_index; i < start_index + duration; i++) {
-        //  printf("tm_read targetn: %p\n", target);
-        if(!read_word(node->p[i], transaction, (char *)(target + (i - start_index) * region->align), node->Wordp + i * 2 * region->align)) {
+        long long addr = (node->node_id << (48)) + i;
+        insert_to_modified(region->batcher, addr);
+        if(!read_word(node->p[i], transaction, (char *)(target + (i - start_index) * region->align), node->Wordp + i * 2 * region->align, region->batcher)) {
             transaction->aborted = true;
             return false;
         }
@@ -465,7 +515,8 @@ bool tm_read(shared_t unused(shared), tx_t unused(tx), void const* unused(source
  * @return Whether the whole transaction can continue
 **/
 bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(source), size_t unused(size), void* unused(target)) noexcept {
-   // cout<<"tm_write"<<endl;
+
+    //cout<<"tm_write"<<endl;
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
@@ -478,7 +529,9 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(sourc
     long long duration = size / region->align;
     struct segment_node* node = region->block[segment_index];
     for(int i = start_index; i < start_index + duration; i++) {
-        if(!write_word(node->p[i], transaction, (char*)(source + (i - start_index) * region->align), node->Wordp + i * 2 * region->align)) {
+        long long addr = (node->node_id << (48)) + i;
+        insert_to_modified(region->batcher, addr);
+        if(!write_word(node->p[i], transaction, (char*)(source + (i - start_index) * region->align), node->Wordp + i * 2 * region->align, region->batcher)) {
             //printf("aborted");
             transaction->aborted = true;
             return false;
@@ -496,7 +549,7 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* unused(sourc
  * @return Whether the whole transaction can continue (success/nomem), or not (abort_alloc)
 **/
 Alloc tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size), void** unused(target)) noexcept {
-    //printf("tm_alloc\n");
+    //cout<<"tm_alloc"<<endl;
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return Alloc::abort;
@@ -518,6 +571,7 @@ Alloc tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size), vo
  * @return Whether the whole transaction can continue
 **/
 bool tm_free(shared_t unused(shared), tx_t unused(tx), void* unused(target)) noexcept {
+   // cout<<"tm_free"<<endl;
     Transaction* transaction = (struct Transaction*) tx;
     if(transaction->aborted) {
         return false;
